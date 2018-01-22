@@ -415,7 +415,7 @@ function pollForDeploy(pollingState, versionId, galaxyUrl) {
       }
   } else {
     // If we did not get a valid Version Status response, just fail silently and
-    // keep polling as per usual – this may have just been a whiff from Galaxy
+    // keep polling as per usual – this may have just been a whiff from Galaxy.
     // We do the retry here because we might hit an error if we try to parse the
     // result of the version-status call below.
     Console.warn('Unexpected error from Galaxy',
