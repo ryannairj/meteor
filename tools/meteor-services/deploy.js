@@ -80,7 +80,7 @@ function deployRpc(options) {
   options = Object.assign({}, options);
   options.headers = Object.assign({}, options.headers || {});
   if (options.headers.cookie) {
-    throw new Error("sorry, can't combine cookie headers yet.");
+    throw new Error("sorry, can't combine cookie headers yet");
   }
   options.qs = Object.assign({}, options.qs,
     {capabilities: CAPABILITIES.slice()});
