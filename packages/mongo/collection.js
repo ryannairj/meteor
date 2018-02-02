@@ -24,121 +24,118 @@ The default id generation technique is `'STRING'`.
  * @param {Function} options.transform An optional transformation function. Documents will be passed through this function before being returned from `fetch` or `findOne`, and before being passed to callbacks of `observe`, `map`, `forEach`, `allow`, and `deny`. Transforms are *not* applied for the callbacks of `observeChanges` or to cursors returned from publish functions.
  * @param {Boolean} options.defineMutationMethods Set to `false` to skip setting up the mutation methods that enable insert/update/remove from client code. Default `true`.
  */
-Mongo.Collection = class Collection {
-  constructor(name, options) {
-    if (! (this instanceof Mongo.Collection))
-      throw new Error('use "new" to construct a Mongo.Collection');
+Mongo.Collection = function Collection(name, options) {
+  if (!name && (name !== null)) {
+    Meteor._debug("Warning: creating anonymous collection. It will not be " +
+                  "saved or synchronized over the network. (Pass null for " +
+                  "the collection name to turn off this warning.)");
+    name = null;
+  }
 
-    if (!name && (name !== null)) {
-      Meteor._debug("Warning: creating anonymous collection. It will not be " +
-                    "saved or synchronized over the network. (Pass null for " +
-                    "the collection name to turn off this warning.)");
-      name = null;
-    }
+  if (name !== null && typeof name !== "string") {
+    throw new Error(
+      "First argument to new Mongo.Collection must be a string or null");
+  }
 
-    if (name !== null && typeof name !== "string") {
-      throw new Error(
-        "First argument to new Mongo.Collection must be a string or null");
-    }
+  if (options && options.methods) {
+    // Backwards compatibility hack with original signature (which passed
+    // "connection" directly instead of in options. (Connections must have a "methods"
+    // method.)
+    // XXX remove before 1.0
+    options = {connection: options};
+  }
+  // Backwards compatibility: "connection" used to be called "manager".
+  if (options && options.manager && !options.connection) {
+    options.connection = options.manager;
+  }
 
-    if (options && options.methods) {
-      // Backwards compatibility hack with original signature (which passed
-      // "connection" directly instead of in options. (Connections must have a "methods"
-      // method.)
-      // XXX remove before 1.0
-      options = {connection: options};
-    }
-    // Backwards compatibility: "connection" used to be called "manager".
-    if (options && options.manager && !options.connection) {
-      options.connection = options.manager;
-    }
-
-    options = {
-      connection: undefined,
-      idGeneration: 'STRING',
-      transform: null,
-      _driver: undefined,
-      _preventAutopublish: false,
+  options = {
+    connection: undefined,
+    idGeneration: 'STRING',
+    transform: null,
+    _driver: undefined,
+    _preventAutopublish: false,
       ...options,
+  };
+
+  switch (options.idGeneration) {
+  case 'MONGO':
+    this._makeNewID = function () {
+      var src = name ? DDP.randomStream('/collection/' + name) : Random.insecure;
+      return new Mongo.ObjectID(src.hexString(24));
     };
+    break;
+  case 'STRING':
+  default:
+    this._makeNewID = function () {
+      var src = name ? DDP.randomStream('/collection/' + name) : Random.insecure;
+      return src.id();
+    };
+    break;
+  }
 
-    switch (options.idGeneration) {
-    case 'MONGO':
-      this._makeNewID = function () {
-        var src = name ? DDP.randomStream('/collection/' + name) : Random.insecure;
-        return new Mongo.ObjectID(src.hexString(24));
-      };
-      break;
-    case 'STRING':
-    default:
-      this._makeNewID = function () {
-        var src = name ? DDP.randomStream('/collection/' + name) : Random.insecure;
-        return src.id();
-      };
-      break;
-    }
+  this._transform = LocalCollection.wrapTransform(options.transform);
 
-    this._transform = LocalCollection.wrapTransform(options.transform);
+  if (! name || options.connection === null)
+    // note: nameless collections never have a connection
+    this._connection = null;
+  else if (options.connection)
+    this._connection = options.connection;
+  else if (Meteor.isClient)
+    this._connection = Meteor.connection;
+  else
+    this._connection = Meteor.server;
 
-    if (! name || options.connection === null)
-      // note: nameless collections never have a connection
-      this._connection = null;
-    else if (options.connection)
-      this._connection = options.connection;
-    else if (Meteor.isClient)
-      this._connection = Meteor.connection;
-    else
-      this._connection = Meteor.server;
-
-    if (!options._driver) {
-      // XXX This check assumes that webapp is loaded so that Meteor.server !==
-      // null. We should fully support the case of "want to use a Mongo-backed
-      // collection from Node code without webapp", but we don't yet.
-      // #MeteorServerNull
-      if (name && this._connection === Meteor.server &&
-          typeof MongoInternals !== "undefined" &&
-          MongoInternals.defaultRemoteCollectionDriver) {
-        options._driver = MongoInternals.defaultRemoteCollectionDriver();
-      } else {
-        const { LocalCollectionDriver } =
-          require("./local_collection_driver.js");
-        options._driver = LocalCollectionDriver;
-      }
-    }
-
-    this._collection = options._driver.open(name, this._connection);
-    this._name = name;
-    this._driver = options._driver;
-
-    this._maybeSetUpReplication(name, options);
-
-    // XXX don't define these until allow or deny is actually used for this
-    // collection. Could be hard if the security rules are only defined on the
-    // server.
-    if (options.defineMutationMethods !== false) {
-      try {
-        this._defineMutationMethods({
-          useExisting: options._suppressSameNameError === true
-        });
-      } catch (error) {
-        // Throw a more understandable error on the server for same collection name
-        if (error.message === `A method named '/${name}/insert' is already defined`)
-          throw new Error(`There is already a collection named "${name}"`);
-        throw error;
-      }
-    }
-
-    // autopublish
-    if (Package.autopublish &&
-        ! options._preventAutopublish &&
-        this._connection &&
-        this._connection.publish) {
-      this._connection.publish(null, () => this.find(), {
-        is_auto: true,
-      });
+  if (!options._driver) {
+    // XXX This check assumes that webapp is loaded so that Meteor.server !==
+    // null. We should fully support the case of "want to use a Mongo-backed
+    // collection from Node code without webapp", but we don't yet.
+    // #MeteorServerNull
+    if (name && this._connection === Meteor.server &&
+        typeof MongoInternals !== "undefined" &&
+        MongoInternals.defaultRemoteCollectionDriver) {
+      options._driver = MongoInternals.defaultRemoteCollectionDriver();
+    } else {
+      const { LocalCollectionDriver } =
+        require("./local_collection_driver.js");
+      options._driver = LocalCollectionDriver;
     }
   }
 
+  this._collection = options._driver.open(name, this._connection);
+  this._name = name;
+  this._driver = options._driver;
+
+  this._maybeSetUpReplication(name, options);
+
+  // XXX don't define these until allow or deny is actually used for this
+  // collection. Could be hard if the security rules are only defined on the
+  // server.
+  if (options.defineMutationMethods !== false) {
+    try {
+      this._defineMutationMethods({
+        useExisting: options._suppressSameNameError === true
+      });
+    } catch (error) {
+      // Throw a more understandable error on the server for same collection name
+      if (error.message === `A method named '/${name}/insert' is already defined`)
+        throw new Error(`There is already a collection named "${name}"`);
+      throw error;
+    }
+  }
+
+  // autopublish
+  if (Package.autopublish &&
+      ! options._preventAutopublish &&
+      this._connection &&
+      this._connection.publish) {
+    this._connection.publish(null, () => this.find(), {
+      is_auto: true,
+    });
+  }
+};
+
+Object.assign(Mongo.Collection.prototype, {
   _maybeSetUpReplication(name, {
     _suppressSameNameError = false
   }) {
@@ -272,7 +269,7 @@ Mongo.Collection = class Collection {
         throw new Error(message);
       }
     }
-  }
+  },
 
   ///
   /// Main collection API
@@ -283,7 +280,7 @@ Mongo.Collection = class Collection {
       return {};
     else
       return args[0];
-  }
+  },
 
   _getFindOptions(args) {
     var self = this;
@@ -302,7 +299,7 @@ Mongo.Collection = class Collection {
         ...args[1],
       };
     }
-  }
+  },
 
   /**
    * @summary Find the documents in a collection that match the selector.
@@ -333,7 +330,7 @@ Mongo.Collection = class Collection {
       this._getFindSelector(args),
       this._getFindOptions(args)
     );
-  }
+  },
 
   /**
    * @summary Finds the first document that matches the selector, as ordered by sort and skip options. Returns `undefined` if no matching document is found.
@@ -356,8 +353,10 @@ Mongo.Collection = class Collection {
       this._getFindOptions(args)
     );
   }
+});
 
-  static _publishCursor(cursor, sub, collection) {
+Object.assign(Mongo.Collection, {
+  _publishCursor(cursor, sub, collection) {
     var observeHandle = cursor.observeChanges({
       added: function (id, fields) {
         sub.added(collection, id, fields);
@@ -380,14 +379,14 @@ Mongo.Collection = class Collection {
 
     // return the observeHandle in case it needs to be stopped early
     return observeHandle;
-  }
+  },
 
   // protect against dangerous selectors.  falsey and {_id: falsey} are both
   // likely programmer error, and not what you want, particularly for destructive
   // operations. If a falsey _id is sent in, a new string _id will be
   // generated and returned; if a fallbackId is provided, it will be returned
   // instead.
-  static _rewriteSelector(selector, { fallbackId } = {}) {
+  _rewriteSelector(selector, { fallbackId } = {}) {
     // shorthand -- scalars match _id
     if (LocalCollection._selectorIsId(selector))
       selector = {_id: selector};
@@ -405,7 +404,9 @@ Mongo.Collection = class Collection {
 
     return selector;
   }
+});
 
+Object.assign(Mongo.Collection.prototype, {
   // 'insert' immediately returns the inserted document's new _id.
   // The others return values immediately if you are in a stub, an in-memory
   // unmanaged collection, or a mongo-backed collection and you don't pass a
@@ -520,7 +521,7 @@ Mongo.Collection = class Collection {
       }
       throw e;
     }
-  }
+  },
 
   /**
    * @summary Modify one or more documents in the collection. Returns the number of matched documents.
@@ -585,7 +586,7 @@ Mongo.Collection = class Collection {
       }
       throw e;
     }
-  }
+  },
 
   /**
    * @summary Remove documents from the collection
@@ -619,14 +620,14 @@ Mongo.Collection = class Collection {
       }
       throw e;
     }
-  }
+  },
 
   // Determine if this collection is simply a minimongo representation of a real
   // database on another server
   _isRemoteCollection() {
     // XXX see #MeteorServerNull
     return this._connection && this._connection !== Meteor.server;
-  }
+  },
 
   /**
    * @summary Modify one or more documents in the collection, or insert one if no matching documents were found. Returns an object with keys `numberAffected` (the number of documents modified)  and `insertedId` (the unique _id of the document that was inserted, if any).
@@ -648,7 +649,7 @@ Mongo.Collection = class Collection {
       _returnObject: true,
       upsert: true,
     }, callback);
-  }
+  },
 
   // We'll actually design an index API later. For now, we just pass through to
   // Mongo's, but make it synchronous.
@@ -657,28 +658,28 @@ Mongo.Collection = class Collection {
     if (!self._collection._ensureIndex)
       throw new Error("Can only call _ensureIndex on server collections");
     self._collection._ensureIndex(index, options);
-  }
+  },
 
   _dropIndex(index) {
     var self = this;
     if (!self._collection._dropIndex)
       throw new Error("Can only call _dropIndex on server collections");
     self._collection._dropIndex(index);
-  }
+  },
 
   _dropCollection() {
     var self = this;
     if (!self._collection.dropCollection)
       throw new Error("Can only call _dropCollection on server collections");
     self._collection.dropCollection();
-  }
+  },
 
   _createCappedCollection(byteSize, maxDocuments) {
     var self = this;
     if (!self._collection._createCappedCollection)
       throw new Error("Can only call _createCappedCollection on server collections");
     self._collection._createCappedCollection(byteSize, maxDocuments);
-  }
+  },
 
   /**
    * @summary Returns the [`Collection`](http://mongodb.github.io/node-mongodb-native/2.2/api/Collection.html) object corresponding to this collection from the [npm `mongodb` driver module](https://www.npmjs.com/package/mongodb) which is wrapped by `Mongo.Collection`.
@@ -690,7 +691,7 @@ Mongo.Collection = class Collection {
       throw new Error("Can only call rawCollection on server collections");
     }
     return self._collection.rawCollection();
-  }
+  },
 
   /**
    * @summary Returns the [`Db`](http://mongodb.github.io/node-mongodb-native/2.2/api/Db.html) object corresponding to this collection's database connection from the [npm `mongodb` driver module](https://www.npmjs.com/package/mongodb) which is wrapped by `Mongo.Collection`.
@@ -703,7 +704,7 @@ Mongo.Collection = class Collection {
     }
     return self._driver.mongo.db;
   }
-};
+});
 
 // Convert the callback to not return a result if there is an error
 function wrapCallback(callback, convertResult) {
